@@ -453,4 +453,128 @@ Beneficios de este cambio:
 ¿Te gustaría que profundicemos en cómo funciona internamente el cacheo de setup-node o que ajustemos alguna otra configuración?
 
 
-# 
+# Prompts para limitar ante ramas con PR abierta
+
+## Prompt 1
+```
+Cómo se puede limitar para que solo se ejecute en ramas con una PR abierta?
+```
+
+### Respuesta
+Para limitar la ejecución solo a ramas que tienen un PR abierto, necesitamos modificar la sección on del workflow. Hay dos formas de hacerlo:
+
+Usando pull_request - Se ejecuta cuando se crea/actualiza un PR
+Usando una condición - Verificar si existe un PR asociado al push
+
+La segunda opción es más precisa para tu caso, ya que mencionaste específicamente "push en una rama con PR abierto". Aquí está el workflow actualizado:
+
+...
+
+## Prompt 2
+
+```
+Preferimos la opción 1, entiendo que encaja porque solo se lanzará cuando se crea la PR o se hace un push a la rama con la PR abierta
+```
+
+### Resultado
+
+Exacto, usando el trigger `pull_request` obtenemos exactamente ese comportamiento de una forma más simple y directa. El workflow se ejecutará:
+- Cuando se crea una PR (`opened`)
+- Cuando se hace push a la rama con la PR abierta (`synchronize`)
+- Cuando se reabre una PR cerrada (`reopened`)
+
+Aquí está la versión simplificada:
+
+
+
+```yaml
+name: CI Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  backend-ci:
+    name: Backend CI
+    runs-on: ubuntu-latest
+    
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: './backend/package-lock.json'
+          
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          npm ci
+        env:
+          npm_config_loglevel: error
+
+      - name: Run tests
+        working-directory: ./backend
+        run: npm test
+        env:
+          NODE_ENV: test
+
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: backend-build
+          path: backend/dist/
+          retention-days: 7
+
+      - name: Display artifact information
+        run: |
+          echo "✅ Build artifact has been published!"
+          echo "📁 Artifact name: backend-build"
+          echo "📍 Location: GitHub Actions > This workflow run > Artifacts section"
+          echo "⏳ Retention period: 7 days"
+          echo "🔍 You can find this artifact at:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+```
+
+Beneficios de este enfoque:
+1. **Más simple**: No necesitamos jobs adicionales ni scripts de verificación
+2. **Más mantenible**: Menos código, menos puntos de fallo
+3. **Mejor integración**: GitHub optimiza las ejecuciones en contexto de PR
+4. **Mejor visibilidad**: Los resultados aparecen directamente en la interfaz de PR
+
+Los tipos de eventos que incluimos:
+- `opened`: Primera vez que se crea la PR
+- `synchronize`: Cada vez que se hace push a la rama de la PR
+- `reopened`: Si la PR se cierra y se vuelve a abrir
+
+Otros tipos que podríamos añadir si fuera necesario:
+- `ready_for_review`: Si usas PRs en modo draft
+- `converted_to_draft`: Para pausar CI cuando una PR se convierte en draft
+- `review_requested`: Para ejecutar CI cuando se pide review
+
+¿Te gustaría añadir alguno de estos tipos adicionales o ajustar alguna otra configuración?
