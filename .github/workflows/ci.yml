@@ -34,22 +34,12 @@ jobs:
           # Verificar la firma del commit por seguridad
           persist-credentials: false
 
-      # Cache de dependencias para optimizar builds
-#      - name: Cache dependencies
-#        uses: actions/cache@v3
-#        with:
-#          path: |
-#            ~/.npm
-#            ~/.cache
-#          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-#          restore-keys: |
-#            ${{ runner.os }}-node-
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-#          cache: 'npm'
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: './backend/package-lock.json'  # Especificamos la ruta al package-lock.json
 
       - name: Install dependencies
         working-directory: ./backend
