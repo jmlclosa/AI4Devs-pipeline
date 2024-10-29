@@ -1,4 +1,4 @@
-name: CI Pipeline
+name: AI4Devs-pipeline (backend)
 
 on:
   pull_request:
