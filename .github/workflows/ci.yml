@@ -41,6 +41,10 @@ jobs:
         env:
           npm_config_loglevel: error
 
+      - name: Generate Prisma Client
+        working-directory: ./backend
+        run: npx prisma generate
+
       - name: Run tests
         working-directory: ./backend
         run: npm test
@@ -55,10 +59,11 @@ jobs:
 
       - name: Prepare deployment package
         run: |
-          mkdir -p deploy/dist
-          cp -r backend/dist/* deploy/dist/
+          mkdir -p deploy
+          cp -r backend/dist deploy/
           cp backend/package.json deploy/
           cp backend/package-lock.json deploy/
+          cp -r backend/prisma deploy/ 
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -99,6 +104,7 @@ jobs:
           # Crear archivo de variables de entorno
           echo "NODE_ENV=${{ github.base_ref }}" > deploy/.env
           echo "PORT=${{ vars.APP_PORT }}" >> deploy/.env
+          echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> deploy/.env
           
           # Transfiere los archivos
           ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST "mkdir -p ~/app-deploy"
@@ -121,9 +127,10 @@ jobs:
             sudo cp -r ~/app-deploy/* /opt/app/backend/
             sudo chown -R ubuntu:ubuntu /opt/app/backend
           
-            # Instalar dependencias
+            # Instalar dependencias y generar cliente Prisma
             cd /opt/app/backend
             npm ci --production
+            npx prisma generate
           
             # Limpiar directorio temporal y backups antiguos
             rm -rf ~/app-deploy
