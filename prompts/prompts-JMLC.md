@@ -578,3 +578,427 @@ Otros tipos que podríamos añadir si fuera necesario:
 - `review_requested`: Para ejecutar CI cuando se pide review
 
 ¿Te gustaría añadir alguno de estos tipos adicionales o ajustar alguna otra configuración?
+
+
+# Publicar a EC2 (Claude 3.5 chat)
+
+## Prompt 1
+```
+Necesito modificar para añadir el despliegue del "backend" generado a una instancia EC2. 
+Puedes añadir los jobs y/o pasos necesarios? 
+Sigue buenas prácticas de seguridad y mantenibilidad para el pipeline.
+```
+
+### Resultado
+
+Te ayudo a añadir el despliegue a EC2. Necesitaremos añadir un nuevo job para el despliegue que se ejecute después de que el CI haya pasado correctamente.
+
+
+
+```yaml
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/**'
+
+# Permisos mínimos necesarios
+permissions:
+  contents: read
+  checks: write
+  id-token: write    # Necesario para autenticación OIDC con AWS
+
+jobs:
+  backend-ci:
+    name: Backend CI
+    runs-on: ubuntu-latest
+    
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: './backend/package-lock.json'
+          
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          npm ci
+        env:
+          npm_config_loglevel: error
+
+      - name: Run tests
+        working-directory: ./backend
+        run: npm test
+        env:
+          NODE_ENV: test
+
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: backend-build
+          path: backend/dist/
+          retention-days: 7
+
+  deploy-to-ec2:
+    name: Deploy to EC2
+    needs: backend-ci    # Espera a que CI pase
+    runs-on: ubuntu-latest
+    # Solo despliega en PRs de determinadas ramas (ajusta según necesidades)
+    if: github.base_ref == 'develop' || github.base_ref == 'staging'
+    
+    environment:
+      name: ${{ github.base_ref }}  # Ambiente basado en la rama destino
+      url: ${{ vars.EC2_APPLICATION_URL }}  # URL de la aplicación
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-role
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Descarga el artifact del job anterior
+      - name: Download build artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: backend-build
+          path: backend/dist
+
+      # Genera un timestamp para el nombre del despliegue
+      - name: Generate deployment timestamp
+        id: timestamp
+        run: echo "timestamp=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
+
+      # Empaqueta la build para el despliegue
+      - name: Package deployment
+        run: |
+          tar -czf deployment.tar.gz \
+            -C backend/dist .
+          
+      # Sube el paquete a S3
+      - name: Upload to S3
+        run: |
+          aws s3 cp deployment.tar.gz \
+            s3://${{ vars.DEPLOYMENT_BUCKET }}/${{ github.base_ref }}/backend_${{ steps.timestamp.outputs.timestamp }}.tar.gz
+
+      # Ejecuta el script de despliegue en EC2 vía AWS Systems Manager
+      - name: Deploy to EC2
+        run: |
+          aws ssm send-command \
+            --targets "Key=tag:Environment,Values=${{ github.base_ref }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'cd /opt/app',
+              'aws s3 cp s3://${{ vars.DEPLOYMENT_BUCKET }}/${{ github.base_ref }}/backend_${{ steps.timestamp.outputs.timestamp }}.tar.gz .',
+              'pm2 stop backend || true',
+              'rm -rf dist/*',
+              'tar -xzf backend_${{ steps.timestamp.outputs.timestamp }}.tar.gz -C dist/',
+              'pm2 start ecosystem.config.js --env ${{ github.base_ref }}',
+              'rm backend_${{ steps.timestamp.outputs.timestamp }}.tar.gz'
+            ]" \
+            --comment "Deployment ${{ steps.timestamp.outputs.timestamp }}"
+
+      # Verifica el estado del despliegue
+      - name: Verify deployment
+        run: |
+          # Espera a que la aplicación esté disponible
+          attempts=0
+          max_attempts=30
+          until curl -s -f ${{ vars.EC2_HEALTH_CHECK_URL }} > /dev/null || [ $attempts -eq $max_attempts ]
+          do
+            attempts=$((attempts+1))
+            echo "Waiting for application to be ready... ($attempts/$max_attempts)"
+            sleep 10
+          done
+          
+          if [ $attempts -eq $max_attempts ]; then
+            echo "❌ Deployment verification failed"
+            exit 1
+          fi
+          
+          echo "✅ Deployment verified successfully"
+
+```
+
+Las mejoras y consideraciones de seguridad incluidas son:
+
+1. **Seguridad**:
+    - Uso de OIDC para autenticación con AWS (sin credenciales almacenadas)
+    - Separación de ambientes (environment) por rama
+    - Variables sensibles almacenadas en GitHub Secrets/Variables
+    - Uso de AWS Systems Manager en lugar de SSH directo
+    - Permisos mínimos necesarios
+
+2. **Mantenibilidad**:
+    - Job separado para despliegue
+    - Condición `needs` para asegurar orden correcto
+    - Verificación post-despliegue
+    - Nomenclatura con timestamps
+    - Backup implícito en S3
+
+3. **Configuración necesaria**:
+   Variables a configurar en GitHub:
+   ```markdown
+   - AWS_ACCOUNT_ID: ID de la cuenta AWS
+   - AWS_REGION: Región de AWS
+   - DEPLOYMENT_BUCKET: Bucket S3 para artefactos
+   - EC2_APPLICATION_URL: URL de la aplicación
+   - EC2_HEALTH_CHECK_URL: URL del health check
+   ```
+
+4. **Prerrequisitos en AWS**:
+   ```markdown
+   1. Role IAM para GitHub Actions con permisos para:
+      - S3 (PutObject)
+      - Systems Manager (SendCommand)
+      - EC2 (Tag-based access)
+   
+   2. EC2 configurada con:
+      - AWS Systems Manager Agent
+      - Tag "Environment" con valor correspondiente
+      - Role IAM con acceso a S3
+      - PM2 instalado
+   ```
+
+¿Te gustaría que profundicemos en algún aspecto específico o que ajustemos alguna parte del despliegue?
+
+Por ejemplo:
+- Ajustar la estrategia de rollback
+- Modificar la verificación post-despliegue
+- Añadir notificaciones
+- Configurar despliegues blue/green
+
+## Prompt 2
+
+```
+Podemos simplificar el proceso para solo usar EC2 y no usar S3?
+```
+
+### Resultado
+
+Sí, podemos simplificar el proceso usando solo SSH directo a EC2. Usaremos una clave SSH almacenada como secreto en GitHub Actions para una conexión segura.
+
+
+
+```yaml
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  backend-ci:
+    name: Backend CI
+    runs-on: ubuntu-latest
+    
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: './backend/package-lock.json'
+          
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          npm ci
+        env:
+          npm_config_loglevel: error
+
+      - name: Run tests
+        working-directory: ./backend
+        run: npm test
+        env:
+          NODE_ENV: test
+
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: backend-build
+          path: backend/dist/
+          retention-days: 7
+
+  deploy-to-ec2:
+    name: Deploy to EC2
+    needs: backend-ci
+    runs-on: ubuntu-latest
+    if: github.base_ref == 'develop' || github.base_ref == 'staging'
+    
+    environment:
+      name: ${{ github.base_ref }}
+      url: ${{ vars.EC2_APPLICATION_URL }}
+
+    steps:
+      # Descarga el artifact del job anterior
+      - name: Download build artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: backend-build
+          path: dist
+
+      # Configura la clave SSH como un archivo
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ vars.EC2_SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      # Empaqueta y despliega vía SSH
+      - name: Deploy to EC2
+        env:
+          EC2_USER: ${{ vars.EC2_USER }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          # Crear archivo de variables de entorno si es necesario
+          echo "NODE_ENV=${{ github.base_ref }}" > .env
+          echo "PORT=${{ vars.APP_PORT }}" >> .env
+          
+          # Crea un directorio temporal con timestamp
+          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+          DEPLOY_DIR="backend_$TIMESTAMP"
+          
+          # Transfiere los archivos
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST "mkdir -p ~/$DEPLOY_DIR"
+          scp -i ~/.ssh/deploy_key -r dist/* .env $EC2_USER@$EC2_HOST:~/$DEPLOY_DIR/
+          
+          # Ejecuta el script de despliegue
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'ENDSSH'
+            # Variables del despliegue actual
+            DEPLOY_DIR=$DEPLOY_DIR
+            APP_DIR=/opt/app/backend
+            
+            # Detener la aplicación actual
+            pm2 stop backend || true
+            
+            # Backup del despliegue anterior
+            if [ -d "$APP_DIR" ]; then
+              mv $APP_DIR "${APP_DIR}_backup_$(date +'%Y%m%d_%H%M%S')"
+            fi
+            
+            # Mover nuevo código a producción
+            mkdir -p $APP_DIR
+            mv ~/$DEPLOY_DIR/* $APP_DIR/
+            
+            # Iniciar la aplicación
+            cd $APP_DIR
+            pm2 start ecosystem.config.js --env ${{ github.base_ref }}
+            
+            # Limpieza: eliminar directorio temporal y backups antiguos
+            rm -rf ~/$DEPLOY_DIR
+            find /opt/app -name "backend_backup_*" -type d -mtime +7 -exec rm -rf {} \;
+ENDSSH
+
+      # Verifica el despliegue
+      - name: Verify deployment
+        env:
+          HEALTH_CHECK_URL: ${{ vars.EC2_HEALTH_CHECK_URL }}
+        run: |
+          attempts=0
+          max_attempts=30
+          until curl -s -f $HEALTH_CHECK_URL > /dev/null || [ $attempts -eq $max_attempts ]
+          do
+            attempts=$((attempts+1))
+            echo "Waiting for application to be ready... ($attempts/$max_attempts)"
+            sleep 10
+          done
+          
+          if [ $attempts -eq $max_attempts ]; then
+            echo "❌ Deployment verification failed"
+            exit 1
+          fi
+          
+          echo "✅ Deployment verified successfully"
+
+      # Limpia las credenciales SSH
+      - name: Cleanup SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+```
+
+Cambios y mejoras principales:
+
+1. **Simplificación**:
+    - Eliminado S3 y Systems Manager
+    - Conexión directa vía SSH
+    - Proceso más directo y fácil de debugear
+
+2. **Seguridad**:
+    - Uso de secretos para la clave SSH
+    - Limpieza de credenciales después del uso
+    - Permisos restrictivos para la clave SSH (600)
+    - Verificación de known_hosts
+
+3. **Variables necesarias en GitHub**:
+   ```markdown
+   Secrets:
+   - EC2_SSH_KEY: Clave SSH privada para conexión
+   
+   Variables:
+   - EC2_USER: Usuario SSH en EC2 (ej: ubuntu)
+   - EC2_HOST: Hostname o IP de EC2
+   - EC2_SSH_KNOWN_HOSTS: Salida de ssh-keyscan para el host
+   - EC2_APPLICATION_URL: URL de la aplicación
+   - EC2_HEALTH_CHECK_URL: URL del health check
+   - APP_PORT: Puerto de la aplicación
+   ```
+
+4. **Características del despliegue**:
+    - Backup automático del despliegue anterior
+    - Limpieza de backups antiguos (>7 días)
+    - Verificación post-despliegue
+    - Variables de entorno configurables
+    - Manejo de errores y rollback implícito
+
+¿Te gustaría que ajustemos algo específico? Por ejemplo:
+- Modificar la estrategia de backup
+- Ajustar los timeouts de verificación
+- Añadir pasos de rollback explícitos
+- Configurar notificaciones de despliegue
