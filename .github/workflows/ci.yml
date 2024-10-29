@@ -1,0 +1,173 @@
+name: AI4Devs-pipeline (backend)
+
+on:
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  backend-ci:
+    name: Backend CI
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: './backend/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          npm ci
+        env:
+          npm_config_loglevel: error
+
+      - name: Generate Prisma Client
+        working-directory: ./backend
+        run: npx prisma generate
+
+      - name: Run tests
+        working-directory: ./backend
+        run: npm test
+        env:
+          NODE_ENV: test
+
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Prepare deployment package
+        run: |
+          mkdir -p deploy
+          cp -r backend/dist deploy/
+          cp backend/package.json deploy/
+          cp backend/package-lock.json deploy/
+          cp -r backend/prisma deploy/ 
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-build
+          path: deploy/
+          retention-days: 7
+
+  deploy-to-ec2:
+    name: Deploy to EC2
+    needs: backend-ci
+    runs-on: ubuntu-latest
+    #    if: github.base_ref == 'develop' || github.base_ref == 'staging'
+
+    environment:
+      name: ${{ github.base_ref }}
+      url: ${{ vars.EC2_APPLICATION_URL }}
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-build
+          path: deploy
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ vars.EC2_SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        env:
+          EC2_USER: ${{ vars.EC2_USER }}
+          EC2_HOST: ${{ vars.EC2_HOST }}
+        run: |
+          echo "NODE_ENV=${{ github.base_ref }}" > deploy/.env
+          echo "PORT=${{ vars.APP_PORT }}" >> deploy/.env
+          echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> deploy/.env
+          
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST "mkdir -p ~/app-deploy"
+          scp -i ~/.ssh/deploy_key -r deploy/* $EC2_USER@$EC2_HOST:~/app-deploy/
+          
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'ENDSSH'
+            # Cargar NVM y Node
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          
+            # Verificar que Node está disponible
+            echo "Node version: $(node --version)"
+            echo "NPM version: $(npm --version)"
+          
+            # Detener el servicio actual
+            sudo systemctl stop backend || true
+          
+            # Respaldar la versión anterior
+            if [ -d "/opt/app/backend" ]; then
+              sudo mv /opt/app/backend "/opt/app/backend_backup_$(date +'%Y%m%d_%H%M%S')"
+            fi
+          
+            # Crear nuevo directorio
+            sudo mkdir -p /opt/app/backend
+          
+            # Mover archivos al directorio de la aplicación
+            sudo cp -r ~/app-deploy/* /opt/app/backend/
+            sudo chown -R ubuntu:ubuntu /opt/app/backend
+          
+            # Instalar dependencias y generar cliente Prisma
+            cd /opt/app/backend
+            npm ci --production
+            npx prisma generate
+            npx prisma migrate dev
+          
+            # Limpiar directorio temporal y backups antiguos
+            rm -rf ~/app-deploy
+            find /opt/app -name "backend_backup_*" -type d -mtime +7 -exec sudo rm -rf {} \;
+          
+            # Reiniciar el servicio
+            sudo systemctl restart backend
+            sleep 5
+            sudo systemctl status backend
+          ENDSSH
+
+      - name: Verify deployment
+        env:
+          HEALTH_CHECK_URL: ${{ vars.EC2_HEALTH_CHECK_URL }}
+        run: |
+          attempts=0
+          max_attempts=30
+          until curl -s -f $HEALTH_CHECK_URL > /dev/null || [ $attempts -eq $max_attempts ]
+          do
+            attempts=$((attempts+1))
+            echo "Waiting for application to be ready... ($attempts/$max_attempts)"
+            sleep 10
+          done
+          
+          if [ $attempts -eq $max_attempts ]; then
+            echo "❌ Deployment verification failed"
+            exit 1
+          fi
+          
+          echo "✅ Deployment verified successfully"
+
+      - name: Cleanup SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
