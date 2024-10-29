@@ -136,6 +136,7 @@ jobs:
             cd /opt/app/backend
             npm ci --production
             npx prisma generate
+            npx prisma migrate dev
           
             # Limpiar directorio temporal y backups antiguos
             rm -rf ~/app-deploy
