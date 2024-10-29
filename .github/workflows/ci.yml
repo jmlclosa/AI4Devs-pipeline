@@ -70,3 +70,12 @@ jobs:
           name: backend-build
           path: backend/dist/
           retention-days: 7
+
+      - name: Display artifact information
+        run: |
+          echo "✅ Build artifact has been published!"
+          echo "📁 Artifact name: backend-build"
+          echo "📍 Location: GitHub Actions > This workflow run > Artifacts section"
+          echo "⏳ Retention period: 7 days"
+          echo "🔍 You can find this artifact at:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
