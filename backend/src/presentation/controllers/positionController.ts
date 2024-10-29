@@ -5,7 +5,7 @@ import { getCandidatesByPositionService, getInterviewFlowByPositionService, getA
 export const getAllPositions = async (req: Request, res: Response) => {
     try {
         const positions = await getAllPositionsService();
-        res.status(200).json(positions);
+        res.status(200).json({positions: positions});
     } catch (error) {
         res.status(500).json({ message: 'Error retrieving positions', error: error instanceof Error ? error.message : String(error) });
     }
