@@ -53,11 +53,18 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: Prepare deployment package
+        run: |
+          mkdir -p deploy/dist
+          cp -r backend/dist/* deploy/dist/
+          cp backend/package.json deploy/
+          cp backend/package-lock.json deploy/
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: backend-build
-          path: backend/dist/
+          path: deploy/
           retention-days: 7
 
   deploy-to-ec2:
@@ -75,7 +82,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: backend-build
-          path: dist
+          path: deploy
 
       - name: Configure SSH
         run: |
@@ -89,68 +96,65 @@ jobs:
           EC2_USER: ${{ vars.EC2_USER }}
           EC2_HOST: ${{ vars.EC2_HOST }}
         run: |
-          ls -lha dist
-          # Crear archivo de variables de entorno si es necesario
-          #          echo "NODE_ENV=${{ github.base_ref }}" > .env
-          #          echo "PORT=${{ vars.APP_PORT }}" >> .env
-
-          # Crea un directorio temporal con timestamp
-          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-          DEPLOY_DIR="backend_$TIMESTAMP"
+          # Crear archivo de variables de entorno
+          echo "NODE_ENV=${{ github.base_ref }}" > deploy/.env
+          echo "PORT=${{ vars.APP_PORT }}" >> deploy/.env
           
           # Transfiere los archivos
-          ssh -v -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST "mkdir -p ~/$DEPLOY_DIR"
-          scp -v -i ~/.ssh/deploy_key -r dist/* $EC2_USER@$EC2_HOST:~/$DEPLOY_DIR/
-
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST "mkdir -p ~/app-deploy"
+          scp -i ~/.ssh/deploy_key -r deploy/* $EC2_USER@$EC2_HOST:~/app-deploy/
+          
           # Ejecuta el script de despliegue
-        #          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'ENDSSH'
-        #            # Variables del despliegue actual
-        #            DEPLOY_DIR=$DEPLOY_DIR
-        #            APP_DIR=/opt/app/backend
-        #
-        #            # Detener la aplicación actual
-        #            pm2 stop backend || true
-        #
-        #            # Backup del despliegue anterior
-        #            if [ -d "$APP_DIR" ]; then
-        #              mv $APP_DIR "${APP_DIR}_backup_$(date +'%Y%m%d_%H%M%S')"
-        #            fi
-        #
-        #            # Mover nuevo código a producción
-        #            mkdir -p $APP_DIR
-        #            mv ~/$DEPLOY_DIR/* $APP_DIR/
-        #
-        #            # Iniciar la aplicación
-        #            cd $APP_DIR
-        #            pm2 start ecosystem.config.js --env ${{ github.base_ref }}
-        #
-        #            # Limpieza: eliminar directorio temporal y backups antiguos
-        #            rm -rf ~/$DEPLOY_DIR
-        #            find /opt/app -name "backend_backup_*" -type d -mtime +7 -exec rm -rf {} \;
-        #          ENDSSH
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'ENDSSH'
+            # Detener el servicio actual
+            sudo systemctl stop backend || true
+          
+            # Respaldar la versión anterior
+            if [ -d "/opt/app/backend" ]; then
+              sudo mv /opt/app/backend "/opt/app/backend_backup_$(date +'%Y%m%d_%H%M%S')"
+            fi
+          
+            # Crear nuevo directorio
+            sudo mkdir -p /opt/app/backend
+          
+            # Mover archivos al directorio de la aplicación
+            sudo cp -r ~/app-deploy/* /opt/app/backend/
+            sudo chown -R ubuntu:ubuntu /opt/app/backend
+          
+            # Instalar dependencias
+            cd /opt/app/backend
+            npm ci --production
+          
+            # Limpiar directorio temporal y backups antiguos
+            rm -rf ~/app-deploy
+            find /opt/app -name "backend_backup_*" -type d -mtime +7 -exec sudo rm -rf {} \;
+          
+            # Reiniciar el servicio
+            sudo systemctl restart backend
+            sleep 5
+            sudo systemctl status backend
+          ENDSSH
 
-        # Verifica el despliegue
-      #        - name: Verify deployment
-      #          env:
-      #            HEALTH_CHECK_URL: ${{ vars.EC2_HEALTH_CHECK_URL }}
-      #          run: |
-      #            attempts=0
-      #            max_attempts=30
-      #            until curl -s -f $HEALTH_CHECK_URL > /dev/null || [ $attempts -eq $max_attempts ]
-      #            do
-      #              attempts=$((attempts+1))
-      #              echo "Waiting for application to be ready... ($attempts/$max_attempts)"
-      #              sleep 10
-      #            done
-      #
-      #            if [ $attempts -eq $max_attempts ]; then
-      #              echo "❌ Deployment verification failed"
-      #              exit 1
-      #            fi
-      #
-      #            echo "✅ Deployment verified successfully"
+      - name: Verify deployment
+        env:
+          HEALTH_CHECK_URL: ${{ vars.EC2_HEALTH_CHECK_URL }}
+        run: |
+          attempts=0
+          max_attempts=30
+          until curl -s -f $HEALTH_CHECK_URL > /dev/null || [ $attempts -eq $max_attempts ]
+          do
+            attempts=$((attempts+1))
+            echo "Waiting for application to be ready... ($attempts/$max_attempts)"
+            sleep 10
+          done
+          
+          if [ $attempts -eq $max_attempts ]; then
+            echo "❌ Deployment verification failed"
+            exit 1
+          fi
+          
+          echo "✅ Deployment verified successfully"
 
-      # Limpia las credenciales SSH
       - name: Cleanup SSH credentials
         if: always()
         run: rm -f ~/.ssh/deploy_key

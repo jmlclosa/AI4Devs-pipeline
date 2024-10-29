@@ -933,7 +933,7 @@ jobs:
             # Limpieza: eliminar directorio temporal y backups antiguos
             rm -rf ~/$DEPLOY_DIR
             find /opt/app -name "backend_backup_*" -type d -mtime +7 -exec rm -rf {} \;
-ENDSSH
+          ENDSSH
 
       # Verifica el despliegue
       - name: Verify deployment
@@ -1002,3 +1002,40 @@ Cambios y mejoras principales:
 - Ajustar los timeouts de verificación
 - Añadir pasos de rollback explícitos
 - Configurar notificaciones de despliegue
+
+
+## Más iteraciones para completar el deploy
+
+```
+Como puedo instalar Node y pm2 para ejecutar la aplicación en el servidor de EC2 siendo un Ubuntu?
+```
+
+```
+Puedes simplificar la Github actions para que no se use pm2?
+```
+
+```
+Al arrancar el servicio con node index.js se produce un error:
+
+<error>
+node:internal/modules/cjs/loader:1228
+  throw err;
+  ^
+Error: Cannot find module 'express'
+Require stack:
+- /opt/app/backend/index.js
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)
+    at Module._load (node:internal/modules/cjs/loader:1051:27)
+    at Module.require (node:internal/modules/cjs/loader:1311:19)
+    at require (node:internal/modules/helpers:179:18)
+    at Object.<anonymous> (/opt/app/backend/index.js:7:33)
+    at Module._compile (node:internal/modules/cjs/loader:1469:14)
+    at Module._extensions..js (node:internal/modules/cjs/loader:1548:10)
+    at Module.load (node:internal/modules/cjs/loader:1288:32)
+    at Module._load (node:internal/modules/cjs/loader:1104:12)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:174:12) {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [ '/opt/app/backend/index.js' ]
+}
+</error>
+```
