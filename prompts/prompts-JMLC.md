@@ -1039,3 +1039,21 @@ Require stack:
 }
 </error>
 ```
+
+```
+Falla por algun error en "prisma generate".
+
+Puedes actualizar el pipeline en base al fichero package.json que te adjunto?
+```
+
+```
+Como puedo crear una Base de datos en progres en esta instancia EC2?
+```
+
+```
+Parece que al lanzar el script de despliegue falla por "npm: command not found"
+
+Node se ha instalado con NVM, Debo configurar algo para que se cargue node al conectar por SSH?
+```
+
+# ARRANCADO!
