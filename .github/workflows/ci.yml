@@ -101,17 +101,22 @@ jobs:
           EC2_USER: ${{ vars.EC2_USER }}
           EC2_HOST: ${{ vars.EC2_HOST }}
         run: |
-          # Crear archivo de variables de entorno
           echo "NODE_ENV=${{ github.base_ref }}" > deploy/.env
           echo "PORT=${{ vars.APP_PORT }}" >> deploy/.env
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> deploy/.env
           
-          # Transfiere los archivos
           ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST "mkdir -p ~/app-deploy"
           scp -i ~/.ssh/deploy_key -r deploy/* $EC2_USER@$EC2_HOST:~/app-deploy/
           
-          # Ejecuta el script de despliegue
           ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'ENDSSH'
+            # Cargar NVM y Node
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          
+            # Verificar que Node está disponible
+            echo "Node version: $(node --version)"
+            echo "NPM version: $(npm --version)"
+          
             # Detener el servicio actual
             sudo systemctl stop backend || true
           
